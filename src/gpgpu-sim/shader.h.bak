@@ -495,695 +495,402 @@ protected:
 };
 
 
+
 class opndcoll_rfu_t { // operand collector based register file unit
 public:
-	// constructors
-	opndcoll_rfu_t() {
-		m_num_banks = 0;
-		m_shader = NULL;
-		m_initialized = false;
-	}
-	void add_cu_set(unsigned cu_set, unsigned num_cu, unsigned num_dispatch);
-	typedef std::vector<register_set*> port_vector_t;
-	typedef std::vector<unsigned int> uint_vector_t;
-	void add_port(port_vector_t & input, port_vector_t & ouput,
-			uint_vector_t cu_sets);
-	void init(unsigned num_banks, shader_core_ctx *shader);
+   // constructors
+   opndcoll_rfu_t()
+   {
+      m_num_banks=0;
+      m_shader=NULL;
+      m_initialized=false;
+   }
+   void add_cu_set(unsigned cu_set, unsigned num_cu, unsigned num_dispatch);
+   typedef std::vector<register_set*> port_vector_t;
+   typedef std::vector<unsigned int> uint_vector_t;
+   void add_port( port_vector_t & input, port_vector_t & ouput, uint_vector_t cu_sets);
+   void init( unsigned num_banks, shader_core_ctx *shader );
 
-	// modifiers
-	bool writeback(const warp_inst_t &warp); // might cause stall
+   // modifiers
+   bool writeback( const warp_inst_t &warp ); // might cause stall 
 
-	void step() {
-		////////////////////////////////////////////////myeditCompress
-		m_arbiter.arbiter_step(); //compresser
-		////////////////////////////////////////////////myeditCompress
+   void step()
+   {
+        dispatch_ready_cu();   
+        allocate_reads();
+        for( unsigned p = 0 ; p < m_in_ports.size(); p++ ) 
+            allocate_cu( p );
+        process_banks();
+   }
 
-		dispatch_ready_cu();
-		allocate_reads();
+   void dump( FILE *fp ) const
+   {
+      fprintf(fp,"\n");
+      fprintf(fp,"Operand Collector State:\n");
+      for( unsigned n=0; n < m_cu.size(); n++ ) {
+         fprintf(fp,"   CU-%2u: ", n);
+         m_cu[n]->dump(fp,m_shader);
+      }
+      m_arbiter.dump(fp);
+   }
 
-		////////////////////////////////////////////////myeditCompress
-		for (unsigned i = 0; i < m_cu.size(); i++) {
-			m_cu[i]->step(); //decompresser
-		}
-		////////////////////////////////////////////////myeditCompress
-
-		for (unsigned p = 0; p < m_in_ports.size(); p++)
-			allocate_cu(p);
-		process_banks();
-	}
-
-	void dump(FILE *fp) const {
-		fprintf(fp, "\n");
-		fprintf(fp, "Operand Collector State:\n");
-		for (unsigned n = 0; n < m_cu.size(); n++) {
-			fprintf(fp, "   CU-%2u: ", n);
-			m_cu[n]->dump(fp, m_shader);
-		}
-		m_arbiter.dump(fp);
-	}
-
-	shader_core_ctx *shader_core() {
-		return m_shader;
-	}
+   shader_core_ctx *shader_core() { return m_shader; }
 
 private:
 
-	void process_banks() {
-		m_arbiter.reset_alloction();
-	}
-
-	void dispatch_ready_cu();
-	void allocate_cu(unsigned port);
-	void allocate_reads();
-
-	// types
-
-	class collector_unit_t;
-
-	class op_t {
-	public:
-
-		op_t() {
-			m_valid = false;
-		}
-		op_t(collector_unit_t *cu, unsigned op, unsigned reg,
-				unsigned num_banks, unsigned bank_warp_shift) {
-			m_valid = true;
-			m_warp = NULL;
-			m_cu = cu;
-			m_operand = op;
-			m_register = reg;
-			m_bank = register_bank(reg, cu->get_warp_id(), num_banks,
-					bank_warp_shift);
-		}
-		op_t(const warp_inst_t *warp, unsigned reg, unsigned num_banks,
-				unsigned bank_warp_shift) {
-			m_valid = true;
-			m_warp = warp;
-			m_register = reg;
-			m_cu = NULL;
-			m_operand = -1;
-			m_bank = register_bank(reg, warp->warp_id(), num_banks,
-					bank_warp_shift);
-		}
-
-		// accessors
-		bool valid() const {
-			return m_valid;
-		}
-		unsigned get_reg() const {
-			assert(m_valid);
-			return m_register;
-		}
-		unsigned get_wid() const {
-			if (m_warp)
-				return m_warp->warp_id();
-			else if (m_cu)
-				return m_cu->get_warp_id();
-			else
-				abort();
-		}
-		unsigned get_active_count() const {
-			if (m_warp)
-				return m_warp->active_count();
-			else if (m_cu)
-				return m_cu->get_active_count();
-			else
-				abort();
-		}
-		const active_mask_t & get_active_mask() {
-			if (m_warp)
-				return m_warp->get_active_mask();
-			else if (m_cu)
-				return m_cu->get_active_mask();
-			else
-				abort();
-		}
-		unsigned get_sp_op() const {
-			if (m_warp)
-				return m_warp->sp_op;
-			else if (m_cu)
-				return m_cu->get_sp_op();
-			else
-				abort();
-		}
-		unsigned get_oc_id() const {
-			return m_cu->get_id();
-		}
-		unsigned get_bank() const {
-			return m_bank;
-		}
-		unsigned get_operand() const {
-			return m_operand;
-		}
-		void dump(FILE *fp) const {
-			if (m_cu)
-				fprintf(fp, " <R%u, CU:%u, w:%02u> ", m_register,
-						m_cu->get_id(), m_cu->get_warp_id());
-			else if (!m_warp->empty())
-				fprintf(fp, " <R%u, wid:%02u> ", m_register, m_warp->warp_id());
-		}
-		std::string get_reg_string() const {
-			char buffer[64];
-			snprintf(buffer, 64, "R%u", m_register);
-			return std::string(buffer);
-		}
-
-		// modifiers
-		void reset() {
-			m_valid = false;
-		}
-	private:
-		bool m_valid;
-		collector_unit_t *m_cu;
-		const warp_inst_t *m_warp;
-		unsigned m_operand; // operand offset in instruction. e.g., add r1,r2,r3; r2 is oprd 0, r3 is 1 (r1 is dst)
-		unsigned m_register;
-		unsigned m_bank;
-	};
-
-	enum alloc_t {
-		NO_ALLOC, READ_ALLOC, WRITE_ALLOC,
-	};
-
-	class allocation_t {
-	public:
-		allocation_t() {
-			m_allocation = NO_ALLOC;
-		}
-		bool is_read() const {
-			return m_allocation == READ_ALLOC;
-		}
-		bool is_write() const {
-			return m_allocation == WRITE_ALLOC;
-		}
-		bool is_free() const {
-			return m_allocation == NO_ALLOC;
-		}
-		void dump(FILE *fp) const {
-			if (m_allocation == NO_ALLOC) {
-				fprintf(fp, "<free>");
-			} else if (m_allocation == READ_ALLOC) {
-				fprintf(fp, "rd: ");
-				m_op.dump(fp);
-			} else if (m_allocation == WRITE_ALLOC) {
-				fprintf(fp, "wr: ");
-				m_op.dump(fp);
-			}
-			fprintf(fp, "\n");
-		}
-		void alloc_read(const op_t &op) {
-			assert(is_free());
-			m_allocation = READ_ALLOC;
-			m_op = op;
-		}
-		void alloc_write(const op_t &op) {
-			assert(is_free());
-			m_allocation = WRITE_ALLOC;
-			m_op = op;
-		}
-		void reset() {
-			m_allocation = NO_ALLOC;
-		}
-	private:
-		enum alloc_t m_allocation;
-		op_t m_op;
-	};
-
-	class arbiter_t {
-	public:
-		// constructors
-		arbiter_t() {
-			m_queue = NULL;
-			m_allocated_bank = NULL;
-			m_allocator_rr_head = NULL;
-			_inmatch = NULL;
-			_outmatch = NULL;
-			_request = NULL;
-			m_last_cu = 0;
-
-			////////////////////////////////////////////////myeditCompress
-			m_allocated_bank1 = NULL;
-			////////////////////////////////////////////////myeditCompress
-		}
-		void init(unsigned num_cu, unsigned num_banks) {
-			assert(num_cu > 0);
-			assert(num_banks > 0);
-			m_num_collectors = num_cu;
-			m_num_banks = num_banks;
-			_inmatch = new int[m_num_banks];
-			_outmatch = new int[m_num_collectors];
-			_request = new int*[m_num_banks];
-			for (unsigned i = 0; i < m_num_banks; i++)
-				_request[i] = new int[m_num_collectors];
-			m_queue = new std::list<op_t>[num_banks];
-			m_allocated_bank = new allocation_t[num_banks];
-
-			////////////////////////////////////////////////myeditCompress
-			m_allocated_bank1 = new allocation_t[num_banks];
-			c = new compresser(m_allocated_bank);
-			c->init(0); ///////edit compresser's latency here
-			////////////////////////////////////////////////myeditCompress
-
-			m_allocator_rr_head = new unsigned[num_cu];
-			for (unsigned n = 0; n < num_cu; n++)
-				m_allocator_rr_head[n] = n % num_banks;
-			reset_alloction();
-		}
-
-		////////////////////////////////////////////////myeditCompress
-		class compresser { //for write
-		public:
-			compresser(allocation_t *&m_allocated_bank) :
-					m_allocated_bank2(m_allocated_bank) {
-				c_latency = 1;
-			}
-
-			void init(int latency) {
-				c_latency = latency;
-				c_pipeline.resize(16 * (c_latency + 1));
-
-				for (int i = c_pipeline.size() - 1; i >= 0; i--) {
-					c_pipeline[i] = new warp_opt_and_bank();
-				}
-			}
-
-			struct warp_opt_and_bank {
-			public:
-				warp_opt_and_bank() {
-					latency = -1;
-					bank = 17;
-					//operand = new op_t();
-				}
-
-				int latency;
-				unsigned bank;
-				//const op_t *operand;
-				op_t operand;
-			};
-
-			void add(const op_t &op, unsigned bank_num) {
-
-				printf("write compresser reached,  bank:%u\n", bank_num); //warp:%u, op.get_wid(),
-				fflush (stdout);
-
-				for (unsigned i = 0; i < c_pipeline.size(); i++) {
-					if (c_pipeline[i]->latency == -1) {
-						c_pipeline[i]->latency = c_latency;
-						c_pipeline[i]->bank = bank_num;
-						c_pipeline[i]->operand = op;
-						return;
-					}
-				}
-
-				for (unsigned i = 0; i < c_pipeline.size(); i++) {
-					printf("pipeline block:%u, latency:%d\n", i,
-							c_pipeline[i]->latency);
-					fflush(stdout);
-				}
-				assert(0 && "compresser pipeline full");
-			}
-
-			void compresser_step() {
-				for (unsigned i = 0; i < c_pipeline.size(); i++) {
-
-					if (c_pipeline[i]->latency == 0) {
-						c_pipeline[i]->latency = -1;
-						m_allocated_bank2[c_pipeline[i]->bank].alloc_write(
-								c_pipeline[i]->operand); //deliver to RBs
-						printf("write Register bank reached, bank:%u\n",
-								c_pipeline[i]->bank); //warp:%u, c_pipeline.front().operand.get_wid(),
-						fflush (stdout);
-
-						if (c_pipeline[i]->bank == 14
-								|| c_pipeline[i]->bank == 15) {
-							c_pipeline[i]->bank = 18;
-						}
-					}
-
-					if (c_pipeline[i]->latency > 0) {
-						c_pipeline[i]->latency = c_pipeline[i]->latency - 1;
-					}
-
-					printf("write step reached, bank:%u\n",
-							c_pipeline[i]->bank);
-					fflush (stdout);
-				}
-			}
-
-		private:
-			std::vector<warp_opt_and_bank*> c_pipeline;
-			int c_latency;
-			allocation_t *&m_allocated_bank2; // bank # -> register that wins
-		};
-
-		void arbiter_step() {
-			printf("write step reached\n");
-			c->compresser_step();
-		}
-		////////////////////////////////////////////////myeditCompress
-
-		// accessors
-		void dump(FILE *fp) const {
-			fprintf(fp, "\n");
-			fprintf(fp, "  Arbiter State:\n");
-			fprintf(fp, "  requests:\n");
-			for (unsigned b = 0; b < m_num_banks; b++) {
-				fprintf(fp, "    bank %u : ", b);
-				std::list<op_t>::const_iterator o = m_queue[b].begin();
-				for (; o != m_queue[b].end(); o++) {
-					o->dump(fp);
-				}
-				fprintf(fp, "\n");
-			}
-			fprintf(fp, "  grants:\n");
-			for (unsigned b = 0; b < m_num_banks; b++) {
-				fprintf(fp, "    bank %u : ", b);
-				m_allocated_bank[b].dump(fp);
-			}
-			fprintf(fp, "\n");
-		}
-
-		// modifiers
-		std::list<op_t> allocate_reads();
-
-		void add_read_requests(collector_unit_t *cu) {
-			printf("debug:void add_read_requests(collector_unit_t *cu)\n");
-			fflush (stdout);
-
-			const op_t *src = cu->get_operands();
-			for (unsigned i = 0; i < MAX_REG_OPERANDS * 2; i++) {
-				const op_t &op = src[i];
-				if (op.valid()) {
-					unsigned bank = op.get_bank();
-					m_queue[bank].push_back(op);
-				}
-			}
-		}
-		bool bank_idle(unsigned bank) const {
-			//return m_allocated_bank[bank].is_free();
-
-			////////////////////////////////////////////////myeditCompress
-			return m_allocated_bank1[bank].is_free();
-			////////////////////////////////////////////////myeditCompress
-		}
-
-		//void allocate_bank_for_write(unsigned bank, const op_t &op) {
-		//	assert(bank < m_num_banks);
-		//	m_allocated_bank[bank].alloc_write(op);
-		//}
-
-		////////////////////////////////////////////////myeditCompress
-		void allocate_bank_for_write(unsigned bank, const op_t &op) {
-			assert(bank < m_num_banks);
-			printf("debug:allocate_bank_for_write\n");
-			fflush (stdout);
-
-			m_allocated_bank1[bank].alloc_write(op);
-			c->add(op, bank);
-		}
-		////////////////////////////////////////////////myeditCompress
-
-		void allocate_for_read(unsigned bank, const op_t &op) {
-			assert(bank < m_num_banks);
-			m_allocated_bank[bank].alloc_read(op);
-		}
-		void reset_alloction() {
-			for (unsigned b = 0; b < m_num_banks; b++) {
-				m_allocated_bank[b].reset();
-
-				////////////////////////////////////////////////myeditCompress
-				m_allocated_bank1[b].reset();
-				////////////////////////////////////////////////myeditCompress
-			}
-		}
-
-	private:
-		////////////////////////////////////////////////myeditCompress
-		compresser *c;
-		////////////////////////////////////////////////myeditCompress
-
-		unsigned m_num_banks;
-		unsigned m_num_collectors;
-
-		allocation_t *m_allocated_bank; // bank # -> register that wins
-
-		////////////////////////////////////////////////myeditCompress
-		allocation_t *m_allocated_bank1;
-		////////////////////////////////////////////////myeditCompress
-
-		std::list<op_t> *m_queue;
-
-		unsigned *m_allocator_rr_head; // cu # -> next bank to check for request (rr-arb)
-		unsigned m_last_cu; // first cu to check while arb-ing banks (rr)
-
-		int *_inmatch;
-		int *_outmatch;
-		int **_request;
-	};
-
-	class input_port_t {
-	public:
-		input_port_t(port_vector_t & input, port_vector_t & output,
-				uint_vector_t cu_sets) :
-				m_in(input), m_out(output), m_cu_sets(cu_sets) {
-			assert(input.size() == output.size());
-			assert(not m_cu_sets.empty());
-		}
-		//private:
-		port_vector_t m_in, m_out;
-		uint_vector_t m_cu_sets;
-	};
-
-	class collector_unit_t {
-	public:
-		// constructors
-		collector_unit_t() {
-			m_free = true;
-			m_warp = NULL;
-			m_output_register = NULL;
-			m_src_op = new op_t[MAX_REG_OPERANDS * 2];
-			m_not_ready.reset();
-			m_warp_id = -1;
-			m_num_banks = 0;
-			m_bank_warp_shift = 0;
-
-			////////////////////////////////////////////////myeditCompress
-			dc = new decompresser(*this);
-			dc->init(0); ///////edit decompresser's latency here
-			////////////////////////////////////////////////myeditCompress
-		}
-
-		////////////////////////////////////////////////myeditCompress
-		class decompresser { //for read in collector
-		public:
-			decompresser(collector_unit_t &collector) :
-					OCU(collector) {
-				dc_latency = 2;
-			}
-
-			void init(int latency) {
-				dc_latency = latency;
-				dc_pipeline.resize(dc_latency + 1);
-
-				for (unsigned i = 0; i < dc_pipeline.size(); i++) {
-					dc_pipeline[i] = new warp_operand();
-				}
-			}
-
-			struct warp_operand {
-				warp_operand() {
-					latency = -1;
-				}
-				int latency;
-				unsigned op_num;
-			};
-
-			void add(unsigned op) {
-
-				printf("read decompresser reached,  id:%u, op:%u, warp:%u\n",
-						OCU.get_id(), op, OCU.get_warp_id());
-				fflush (stdout);
-
-				for (unsigned i = 0; i < dc_pipeline.size(); i++) {
-					if (dc_pipeline[i]->latency == -1) {
-						dc_pipeline[i]->latency = dc_latency;
-						dc_pipeline[i]->op_num = op;
-						return;
-					}
-				}
-
-				assert(0 && "decompresser pipeline full"); //should be non-stallable
-			}
-
-			void step() {
-				for (unsigned i = 0; i < dc_pipeline.size(); i++) {
-
-					if (dc_pipeline[i]->latency == 0) {
-						dc_pipeline[i]->latency = -1;
-						(OCU.m_not_ready).reset(dc_pipeline[i]->op_num); //deliver to OCU
-						printf(
-								"read operand collector reached, id:%u, op:%u, warp:%u\n",
-								OCU.get_id(), dc_pipeline[i]->op_num,
-								OCU.get_warp_id());
-						//or print m_not_ready when reached? or print get_operands() of each bank needed?
-						fflush (stdout);
-					}
-
-					if (dc_pipeline[i]->latency > 0) {
-						dc_pipeline[i]->latency = dc_pipeline[i]->latency - 1;
-					}
-				}
-			}
-
-		private:
-			std::vector<warp_operand*> dc_pipeline;
-			int dc_latency;
-			collector_unit_t &OCU;
-		};
-
-		void step() {
-			dc->step();
-		}
-
-		//get_warp(){
-
-		//}
-		////////////////////////////////////////////////myeditCompress
-
-		// accessors
-		bool ready() const;
-		const op_t *get_operands() const {
-			return m_src_op;
-		}
-		void dump(FILE *fp, const shader_core_ctx *shader) const;
-
-		unsigned get_warp_id() const {
-			return m_warp_id;
-		}
-		unsigned get_active_count() const {
-			return m_warp->active_count();
-		}
-		const active_mask_t & get_active_mask() const {
-			return m_warp->get_active_mask();
-		}
-		unsigned get_sp_op() const {
-			return m_warp->sp_op;
-		}
-		unsigned get_id() const {
-			return m_cuid;
-		} // returns CU hw id
-
-		// modifiers
-		void init(unsigned n, unsigned num_banks, unsigned log2_warp_size,
-				const core_config *config, opndcoll_rfu_t *rfu);
-		bool allocate(register_set* pipeline_reg, register_set* output_reg);
-
-		//void collect_operand(unsigned op) {
-		//	m_not_ready.reset(op);
-		//}
-
-		////////////////////////////////////////////////myeditCompress
-		void collect_operand(unsigned op) {
-			printf("debug:collect_operand\n");
-			fflush (stdout);
-			dc->add(op);
-		}
-		////////////////////////////////////////////////myeditCompress
-
-		unsigned get_num_operands() const {
-			return m_warp->get_num_operands();
-		}
-		unsigned get_num_regs() const {
-			return m_warp->get_num_regs();
-		}
-		void dispatch();
-		bool is_free() {
-			return m_free;
-		}
-
-	private:
-		////////////////////////////////////////////////myeditCompress
-		decompresser *dc;
-		////////////////////////////////////////////////myeditCompress
-
-		bool m_free;
-		unsigned m_cuid; // collector unit hw id
-		unsigned m_warp_id;
-		warp_inst_t *m_warp;
-		register_set* m_output_register; // pipeline register to issue to when ready
-		op_t *m_src_op;
-		std::bitset<MAX_REG_OPERANDS * 2> m_not_ready;
-		unsigned m_num_banks;
-		unsigned m_bank_warp_shift;
-		opndcoll_rfu_t *m_rfu;
-
-	};
-
-	class dispatch_unit_t {
-	public:
-		dispatch_unit_t(std::vector<collector_unit_t>* cus) {
-			m_last_cu = 0;
-			m_collector_units = cus;
-			m_num_collectors = (*cus).size();
-			m_next_cu = 0;
-		}
-
-		collector_unit_t *find_ready() {
-			for (unsigned n = 0; n < m_num_collectors; n++) {
-				unsigned c = (m_last_cu + n + 1) % m_num_collectors;
-
-				printf(
-						"debug:unsigned c = (m_last_cu + n + 1) m_num_collectors;\n");
-				fflush (stdout);
-
-				if ((*m_collector_units)[c].ready()) {
-
-					printf("debug:(*m_collector_units)[c].ready()\n");
-					fflush(stdout);
-
-					m_last_cu = c;
-					return &((*m_collector_units)[c]);
-				}
-			}
-			return NULL;
-		}
-
-	private:
-		unsigned m_num_collectors;
-		std::vector<collector_unit_t>* m_collector_units;
-		unsigned m_last_cu; // dispatch ready cu's rr
-		unsigned m_next_cu; // for initialization
-	};
-
-	// opndcoll_rfu_t data members
-	bool m_initialized;
-
-	unsigned m_num_collector_sets;
-	//unsigned m_num_collectors;
-	unsigned m_num_banks;
-	unsigned m_bank_warp_shift;
-	unsigned m_warp_size;
-	std::vector<collector_unit_t *> m_cu;
-	arbiter_t m_arbiter;
-
-	//unsigned m_num_ports;
-	//std::vector<warp_inst_t**> m_input;
-	//std::vector<warp_inst_t**> m_output;
-	//std::vector<unsigned> m_num_collector_units;
-	//warp_inst_t **m_alu_port;
-
-	std::vector<input_port_t> m_in_ports;
-	typedef std::map<unsigned /* collector set */, std::vector<collector_unit_t> /*collector sets*/> cu_sets_t;
-	cu_sets_t m_cus;
-	std::vector<dispatch_unit_t> m_dispatch_units;
-
-	//typedef std::map<warp_inst_t**/*port*/,dispatch_unit_t> port_to_du_t;
-	//port_to_du_t                     m_dispatch_units;
-	//std::map<warp_inst_t**,std::list<collector_unit_t*> > m_free_cu;
-	shader_core_ctx *m_shader;
+   void process_banks()
+   {
+      m_arbiter.reset_alloction();
+   }
+
+   void dispatch_ready_cu();
+   void allocate_cu( unsigned port );
+   void allocate_reads();
+
+   // types
+
+   class collector_unit_t;
+
+   class op_t {
+   public:
+
+      op_t() { m_valid = false; }
+      op_t( collector_unit_t *cu, unsigned op, unsigned reg, unsigned num_banks, unsigned bank_warp_shift )
+      {
+         m_valid = true;
+         m_warp=NULL;
+         m_cu = cu;
+         m_operand = op;
+         m_register = reg;
+         m_bank = register_bank(reg,cu->get_warp_id(),num_banks,bank_warp_shift);
+      }
+      op_t( const warp_inst_t *warp, unsigned reg, unsigned num_banks, unsigned bank_warp_shift )
+      {
+         m_valid=true;
+         m_warp=warp;
+         m_register=reg;
+         m_cu=NULL;
+         m_operand = -1;
+         m_bank = register_bank(reg,warp->warp_id(),num_banks,bank_warp_shift);
+      }
+
+      // accessors
+      bool valid() const { return m_valid; }
+      unsigned get_reg() const
+      {
+         assert( m_valid );
+         return m_register;
+      }
+      unsigned get_wid() const
+      {
+          if( m_warp ) return m_warp->warp_id();
+          else if( m_cu ) return m_cu->get_warp_id();
+          else abort();
+      }
+      unsigned get_active_count() const
+      {
+          if( m_warp ) return m_warp->active_count();
+          else if( m_cu ) return m_cu->get_active_count();
+          else abort();
+      }
+      const active_mask_t & get_active_mask()
+      {
+          if( m_warp ) return m_warp->get_active_mask();
+          else if( m_cu ) return m_cu->get_active_mask();
+          else abort();
+      }
+      unsigned get_sp_op() const
+      {
+          if( m_warp ) return m_warp->sp_op;
+          else if( m_cu ) return m_cu->get_sp_op();
+          else abort();
+      }
+      unsigned get_oc_id() const { return m_cu->get_id(); }
+      unsigned get_bank() const { return m_bank; }
+      unsigned get_operand() const { return m_operand; }
+      void dump(FILE *fp) const 
+      {
+         if(m_cu) 
+            fprintf(fp," <R%u, CU:%u, w:%02u> ", m_register,m_cu->get_id(),m_cu->get_warp_id());
+         else if( !m_warp->empty() )
+            fprintf(fp," <R%u, wid:%02u> ", m_register,m_warp->warp_id() );
+      }
+      std::string get_reg_string() const
+      {
+         char buffer[64];
+         snprintf(buffer,64,"R%u", m_register);
+         return std::string(buffer);
+      }
+
+      // modifiers
+      void reset() { m_valid = false; }
+   private:
+      bool m_valid;
+      collector_unit_t  *m_cu; 
+      const warp_inst_t *m_warp;
+      unsigned  m_operand; // operand offset in instruction. e.g., add r1,r2,r3; r2 is oprd 0, r3 is 1 (r1 is dst)
+      unsigned  m_register;
+      unsigned  m_bank;
+   };
+
+   enum alloc_t {
+      NO_ALLOC,
+      READ_ALLOC,
+      WRITE_ALLOC,
+   };
+
+   class allocation_t {
+   public:
+      allocation_t() { m_allocation = NO_ALLOC; }
+      bool is_read() const { return m_allocation==READ_ALLOC; }
+      bool is_write() const {return m_allocation==WRITE_ALLOC; }
+      bool is_free() const {return m_allocation==NO_ALLOC; }
+      void dump(FILE *fp) const {
+         if( m_allocation == NO_ALLOC ) { fprintf(fp,"<free>"); }
+         else if( m_allocation == READ_ALLOC ) { fprintf(fp,"rd: "); m_op.dump(fp); }
+         else if( m_allocation == WRITE_ALLOC ) { fprintf(fp,"wr: "); m_op.dump(fp); }
+         fprintf(fp,"\n");
+      }
+      void alloc_read( const op_t &op )  { assert(is_free()); m_allocation=READ_ALLOC; m_op=op; }
+      void alloc_write( const op_t &op ) { assert(is_free()); m_allocation=WRITE_ALLOC; m_op=op; }
+      void reset() { m_allocation = NO_ALLOC; }
+   private:
+      enum alloc_t m_allocation;
+      op_t m_op;
+   };
+
+   class arbiter_t {
+   public:
+      // constructors
+      arbiter_t()
+      {
+         m_queue=NULL;
+         m_allocated_bank=NULL;
+         m_allocator_rr_head=NULL;
+         _inmatch=NULL;
+         _outmatch=NULL;
+         _request=NULL;
+         m_last_cu=0;
+      }
+      void init( unsigned num_cu, unsigned num_banks ) 
+      { 
+         assert(num_cu > 0);
+         assert(num_banks > 0);
+         m_num_collectors = num_cu;
+         m_num_banks = num_banks;
+         _inmatch = new int[ m_num_banks ];
+         _outmatch = new int[ m_num_collectors ];
+         _request = new int*[ m_num_banks ];
+         for(unsigned i=0; i<m_num_banks;i++) 
+             _request[i] = new int[m_num_collectors];
+         m_queue = new std::list<op_t>[num_banks];
+         m_allocated_bank = new allocation_t[num_banks];
+         m_allocator_rr_head = new unsigned[num_cu];
+         for( unsigned n=0; n<num_cu;n++ ) 
+            m_allocator_rr_head[n] = n%num_banks;
+         reset_alloction();
+      }
+
+      // accessors
+      void dump(FILE *fp) const
+      {
+         fprintf(fp,"\n");
+         fprintf(fp,"  Arbiter State:\n");
+         fprintf(fp,"  requests:\n");
+         for( unsigned b=0; b<m_num_banks; b++ ) {
+            fprintf(fp,"    bank %u : ", b );
+            std::list<op_t>::const_iterator o = m_queue[b].begin();
+            for(; o != m_queue[b].end(); o++ ) {
+               o->dump(fp);
+            }
+            fprintf(fp,"\n");
+         }
+         fprintf(fp,"  grants:\n");
+         for(unsigned b=0;b<m_num_banks;b++) {
+            fprintf(fp,"    bank %u : ", b );
+            m_allocated_bank[b].dump(fp);
+         }
+         fprintf(fp,"\n");
+      }
+
+      // modifiers
+      std::list<op_t> allocate_reads(); 
+
+      void add_read_requests( collector_unit_t *cu ) 
+      {
+         const op_t *src = cu->get_operands();
+         for( unsigned i=0; i<MAX_REG_OPERANDS*2; i++) {
+            const op_t &op = src[i];
+            if( op.valid() ) {
+               unsigned bank = op.get_bank();
+               m_queue[bank].push_back(op);
+            }
+         }
+      }
+      bool bank_idle( unsigned bank ) const
+      {
+          return m_allocated_bank[bank].is_free();
+      }
+      void allocate_bank_for_write( unsigned bank, const op_t &op )
+      {
+         assert( bank < m_num_banks );
+         m_allocated_bank[bank].alloc_write(op);
+      }
+      void allocate_for_read( unsigned bank, const op_t &op )
+      {
+         assert( bank < m_num_banks );
+         m_allocated_bank[bank].alloc_read(op);
+      }
+      void reset_alloction()
+      {
+         for( unsigned b=0; b < m_num_banks; b++ ) 
+            m_allocated_bank[b].reset();
+      }
+
+   private:
+      unsigned m_num_banks;
+      unsigned m_num_collectors;
+
+      allocation_t *m_allocated_bank; // bank # -> register that wins
+      std::list<op_t> *m_queue;
+
+      unsigned *m_allocator_rr_head; // cu # -> next bank to check for request (rr-arb)
+      unsigned  m_last_cu; // first cu to check while arb-ing banks (rr)
+
+      int *_inmatch;
+      int *_outmatch;
+      int **_request;
+   };
+
+   class input_port_t {
+   public:
+       input_port_t(port_vector_t & input, port_vector_t & output, uint_vector_t cu_sets)
+       : m_in(input),m_out(output), m_cu_sets(cu_sets)
+       {
+           assert(input.size() == output.size());
+           assert(not m_cu_sets.empty());
+       }
+   //private:
+       port_vector_t m_in,m_out;
+       uint_vector_t m_cu_sets;
+   };
+
+   class collector_unit_t {
+   public:
+      // constructors
+      collector_unit_t()
+      { 
+         m_free = true;
+         m_warp = NULL;
+         m_output_register = NULL;
+         m_src_op = new op_t[MAX_REG_OPERANDS*2];
+         m_not_ready.reset();
+         m_warp_id = -1;
+         m_num_banks = 0;
+         m_bank_warp_shift = 0;
+      }
+      // accessors
+      bool ready() const;
+      const op_t *get_operands() const { return m_src_op; }
+      void dump(FILE *fp, const shader_core_ctx *shader ) const;
+
+      unsigned get_warp_id() const { return m_warp_id; }
+      unsigned get_active_count() const { return m_warp->active_count(); }
+      const active_mask_t & get_active_mask() const { return m_warp->get_active_mask(); }
+      unsigned get_sp_op() const { return m_warp->sp_op; }
+      unsigned get_id() const { return m_cuid; } // returns CU hw id
+
+      // modifiers
+      void init(unsigned n, 
+                unsigned num_banks, 
+                unsigned log2_warp_size,
+                const core_config *config,
+                opndcoll_rfu_t *rfu ); 
+      bool allocate( register_set* pipeline_reg, register_set* output_reg );
+
+      void collect_operand( unsigned op )
+      {
+         m_not_ready.reset(op);
+      }
+      unsigned get_num_operands() const{
+    	  return m_warp->get_num_operands();
+      }
+      unsigned get_num_regs() const{
+    	  return m_warp->get_num_regs();
+      }
+      void dispatch();
+      bool is_free(){return m_free;}
+
+   private:
+      bool m_free;
+      unsigned m_cuid; // collector unit hw id
+      unsigned m_warp_id;
+      warp_inst_t  *m_warp;
+      register_set* m_output_register; // pipeline register to issue to when ready
+      op_t *m_src_op;
+      std::bitset<MAX_REG_OPERANDS*2> m_not_ready;
+      unsigned m_num_banks;
+      unsigned m_bank_warp_shift;
+      opndcoll_rfu_t *m_rfu;
+
+   };
+
+   class dispatch_unit_t {
+   public:
+      dispatch_unit_t(std::vector<collector_unit_t>* cus) 
+      { 
+         m_last_cu=0;
+         m_collector_units=cus;
+         m_num_collectors = (*cus).size();
+         m_next_cu=0;
+      }
+
+      collector_unit_t *find_ready()
+      {
+         for( unsigned n=0; n < m_num_collectors; n++ ) {
+            unsigned c=(m_last_cu+n+1)%m_num_collectors;
+            if( (*m_collector_units)[c].ready() ) {
+               m_last_cu=c;
+               return &((*m_collector_units)[c]);
+            }
+         }
+         return NULL;
+      }
+
+   private:
+      unsigned m_num_collectors;
+      std::vector<collector_unit_t>* m_collector_units;
+      unsigned m_last_cu; // dispatch ready cu's rr
+      unsigned m_next_cu;  // for initialization
+   };
+
+   // opndcoll_rfu_t data members
+   bool m_initialized;
+
+   unsigned m_num_collector_sets;
+   //unsigned m_num_collectors;
+   unsigned m_num_banks;
+   unsigned m_bank_warp_shift;
+   unsigned m_warp_size;
+   std::vector<collector_unit_t *> m_cu;
+   arbiter_t m_arbiter;
+
+   //unsigned m_num_ports;
+   //std::vector<warp_inst_t**> m_input;
+   //std::vector<warp_inst_t**> m_output;
+   //std::vector<unsigned> m_num_collector_units;
+   //warp_inst_t **m_alu_port;
+
+   std::vector<input_port_t> m_in_ports;
+   typedef std::map<unsigned /* collector set */, std::vector<collector_unit_t> /*collector sets*/ > cu_sets_t;
+   cu_sets_t m_cus;
+   std::vector<dispatch_unit_t> m_dispatch_units;
+
+   //typedef std::map<warp_inst_t**/*port*/,dispatch_unit_t> port_to_du_t;
+   //port_to_du_t                     m_dispatch_units;
+   //std::map<warp_inst_t**,std::list<collector_unit_t*> > m_free_cu;
+   shader_core_ctx                 *m_shader;
 };
-
 
 class barrier_set_t {
 public:
